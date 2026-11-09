@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Obskit</title>
+  <link rel="stylesheet" href="/ui/static/app.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="#/overview">Obskit <span>Observability</span></a>
+    <nav id="nav" aria-label="Sections"></nav>
+    <div class="bar-end">
+      <span id="tools"></span>
+      <button id="key-button" class="ghost" type="button">API key</button>
+    </div>
+  </header>
+  <main id="view" tabindex="-1"></main>
+  <dialog id="key-dialog">
+    <form method="dialog" id="key-form">
+      <h2>API key</h2>
+      <p>The platform's <code>X-API-Key</code>. It is kept for this browser tab only and sent with each request.</p>
+      <input id="key-input" type="password" autocomplete="off" aria-label="API key">
+      <p id="key-error" class="error" hidden></p>
+      <div class="row"><button type="submit" class="primary">Connect</button></div>
+    </form>
+  </dialog>
+  <script type="module" src="/ui/static/app.js"></script>
+</body>
+</html>
