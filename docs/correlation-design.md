@@ -55,11 +55,11 @@ sang `obs.*` để khỏi phá log của các service đang chạy. Với OpenTe
 | `instance` của job | ⚠️ | chỉ suy ra qua `worker`; job chưa có worker thì mất instance |
 | `incidents` | ⚠️ | có `service_id`, `worker_id`, `workflow_run_id`; thiếu `instance_id`, `job_id` |
 | `service_instances.otel_service_name` / host | ❌ | hiện dựa vào quy ước `service.name == services.name` |
-| Link resolver | ⚠️ chỉ job | có `GET /jobs/{id}/observability` và `/monitoring/links`; thiếu service, instance, worker, workflow-run, incident |
-| Tập placeholder của log template | ⚠️ | `{trace_id} {job_id} {service} {worker} {workflow_id}`; thiếu `{workflow_run_id} {instance} {from} {to}` |
-| Dashboard theo biến | ❌ | chỉ một URL tĩnh Perses; chưa có template + biến theo entity |
+| Link resolver | ✅ (trừ instance) | job, service, worker, workflow-run, incident có `/…/observability`; chưa có route riêng cho instance |
+| Tập placeholder của log template | ✅ | thêm `{workflow_run_id} {instance} {environment} {from} {to}` (job vẫn dùng `{job_id}`) |
+| Dashboard theo biến | ✅ | `OBSKIT_PLATFORM_DASHBOARD_URL_TEMPLATE` với biến `{service} {instance} {worker} {environment} {workflow_id}` |
 | `capabilities` | ✅ tương đương | mỗi link có `available` |
-| Giới hạn thời gian truy vấn, kiểm soát quyền cho link | ❌ | chưa có |
+| Giới hạn thời gian truy vấn, kiểm soát quyền cho link | ⚠️ | khoảng thời gian của incident bị chặn ≤ 24 giờ; link chỉ từ template, giá trị được URL-encode; đọc vẫn mở (xem README, mục Deviations) |
 | Context propagation / SDK (`svn-obskit`) | ➖ ngoài repo này | SDK đã truyền `traceparent` và context (`job_id`, `workflow_run_id`, `step_id`…) và gửi `trace_id` cho job; chưa gửi `span_id` |
 
 **Kết luận:** thiết kế hiện tại **đủ để lưu lifecycle và dẫn link**, và đúng nguyên tắc không chứa telemetry. Chưa đủ

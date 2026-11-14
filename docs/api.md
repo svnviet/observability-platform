@@ -133,6 +133,22 @@ cả batch. `EventBatchResult` có `accepted`, `duplicates`, `rejected`.
   `logs.url` (từ `OBSKIT_PLATFORM_LOGS_URL_TEMPLATE`), `metrics.url` (từ `..._METRICS_URL_TEMPLATE`, nếu không có thì URL Perses/Prometheus).
   Mỗi link có `available: bool`; thiếu giá trị cho một placeholder thì link không khả dụng.
 
+## Observability links (service, worker, workflow run, incident)
+
+| Method | Path | Phản hồi |
+|---|---|---|
+| GET | `/services/{service_id}/observability` | `EntityObservability` |
+| GET | `/workers/{worker_id}/observability` | `EntityObservability` |
+| GET | `/workflow-runs/{run_id}/observability` | `EntityObservability` |
+| GET | `/incidents/{incident_id}/observability` | `EntityObservability` (kèm khoảng thời gian ≤ 24 giờ) |
+
+`EntityObservability`: `entity` (`type`, `id`), `correlation` (các ID mà backend telemetry dùng: `service`, `environment`, `instance`,
+`worker`, `workflow_id`, `workflow_run_id`, `trace_id`), `links` (`logs`, `trace`, `metrics`, `dashboard`, mỗi cái có `available`) và
+`capabilities` (cờ bool tương ứng). Chỉ trả link, không trả dữ liệu log/trace/metric. Link dựng từ template cấu hình
+(`OBSKIT_PLATFORM_LOGS_URL_TEMPLATE`, `..._METRICS_URL_TEMPLATE`, `..._DASHBOARD_URL_TEMPLATE`, `..._JAEGER_URL`); thiếu giá trị cho một
+placeholder thì link không khả dụng. Placeholder: `{service} {environment} {instance} {worker} {workflow_id} {workflow_run_id}
+{trace_id}`, và `{from} {to}` (epoch mili giây) cho incident. Job có route riêng `GET /jobs/{job_id}/observability`.
+
 ## Incidents
 
 | Method | Path | Mô tả |

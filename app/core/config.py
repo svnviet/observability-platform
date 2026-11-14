@@ -82,3 +82,11 @@ def logs_url_template() -> str | None:
 def metrics_url_template() -> str | None:
     """Link template to a service's metrics, e.g. http://perses/d/service?service={service}. Falls back to the Perses URL."""
     return os.environ.get("OBSKIT_PLATFORM_METRICS_URL_TEMPLATE") or None
+
+
+def dashboard_url_template() -> str | None:
+    """Link template to a dashboard, e.g. http://perses/d/service?var-service={service}&var-instance={instance}.
+
+    Placeholders (URL-encoded): {service} {instance} {worker} {environment} {workflow_id}. None hides the link.
+    """
+    return os.environ.get("OBSKIT_PLATFORM_DASHBOARD_URL_TEMPLATE") or None

@@ -10,6 +10,10 @@ from app.failures.router import router as failures_router
 from app.incidents.router import router as incidents_router
 from app.jobs.router import router as jobs_router
 from app.monitoring.router import router as monitoring_router
+from app.observability.router import incidents_router as incident_obs_router
+from app.observability.router import runs_router as run_obs_router
+from app.observability.router import services_router as service_obs_router
+from app.observability.router import workers_router as worker_obs_router
 from app.registry.router import services_router, workers_router
 from app.registry.probe_scheduler import HealthProbeScheduler
 from app.registry.scheduler import HeartbeatScheduler
@@ -55,6 +59,10 @@ for router in (
     incidents_router,
     monitoring_router,
     failures_router,
+    service_obs_router,
+    worker_obs_router,
+    run_obs_router,
+    incident_obs_router,
 ):
     app.include_router(router, dependencies=[Depends(require_api_key_for_writes)])
 app.include_router(auth_router)
