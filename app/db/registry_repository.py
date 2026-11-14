@@ -2,11 +2,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import ServiceInstanceRow, ServiceRow, WorkerRow
+from app.db.models import HealthCheckRow, IncidentRow, JobEventRow, JobRow, ServiceInstanceRow, ServiceRow, WorkerRow
 from app.schemas.enums import InstanceStatus, WorkerStatus
 
 
@@ -174,3 +174,60 @@ class RegistryRepository:
                 .options(selectinload(WorkerRow.instance))
             )
         )
+
+
+    # --- retention ----------------------------------------------------------------------
+
+    def lost_instances(self, cutoff: datetime) -> list[ServiceInstanceRow]:
+        return list(
+            self._session.scalars(
+                select(ServiceInstanceRow).where(
+                    ServiceInstanceRow.status == InstanceStatus.UNHEALTHY.value,
+                    ServiceInstanceRow.last_heartbeat_at < cutoff,
+                )
+            )
+        )
+
+    def lost_workers(self, cutoff: datetime) -> list[WorkerRow]:
+        return list(
+            self._session.scalars(
+                select(WorkerRow).where(
+                    WorkerRow.status == WorkerStatus.UNHEALTHY.value, WorkerRow.last_heartbeat_at < cutoff
+                )
+            )
+        )
+
+    def purge_stopped(self, cutoff: datetime) -> tuple[int, int]:
+        """Delete STOPPED workers and instances silent since before cutoff. Returns (instances, workers).
+
+        Jobs and incidents keep their history; they only lose the link to a worker that no longer exists.
+        """
+        instance_ids = select(ServiceInstanceRow.id).where(
+            ServiceInstanceRow.status == InstanceStatus.STOPPED.value,
+            ServiceInstanceRow.last_heartbeat_at < cutoff,
+        )
+        worker_ids = list(
+            self._session.scalars(
+                select(WorkerRow.id).where(
+                    (WorkerRow.service_instance_id.in_(instance_ids))
+                    | (
+                        (WorkerRow.status == WorkerStatus.STOPPED.value)
+                        & (WorkerRow.last_heartbeat_at < cutoff)
+                    )
+                )
+            )
+        )
+        if worker_ids:
+            self._session.execute(update(JobRow).where(JobRow.worker_id.in_(worker_ids)).values(worker_id=None))
+            self._session.execute(
+                update(JobEventRow).where(JobEventRow.worker_id.in_(worker_ids)).values(worker_id=None)
+            )
+            self._session.execute(
+                update(IncidentRow).where(IncidentRow.worker_id.in_(worker_ids)).values(worker_id=None)
+            )
+            self._session.execute(delete(WorkerRow).where(WorkerRow.id.in_(worker_ids)))
+        self._session.execute(delete(HealthCheckRow).where(HealthCheckRow.service_instance_id.in_(instance_ids)))
+        instances = self._session.execute(
+            delete(ServiceInstanceRow).where(ServiceInstanceRow.id.in_(instance_ids))
+        ).rowcount
+        return instances, len(worker_ids)

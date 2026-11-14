@@ -8,6 +8,8 @@ from app.registry.deps import get_registry_service
 from app.registry.service import RegistryService
 from app.schemas.enums import WorkerStatus
 from app.schemas.registry import (
+    HealthUrlIn,
+    HealthUrlOut,
     HeartbeatIn,
     ServiceDetail,
     ServiceRead,
@@ -43,6 +45,17 @@ def service_heartbeat(
     service_id: uuid.UUID, body: HeartbeatIn, svc: RegistryService = Depends(get_registry_service)
 ):
     return or_404(svc.service_heartbeat(service_id, body), "service instance")
+
+
+@services_router.put("/{service_id}/instances/{instance_id}/health-url", response_model=HealthUrlOut)
+def set_health_url(
+    service_id: uuid.UUID,
+    instance_id: str,
+    body: HealthUrlIn,
+    svc: RegistryService = Depends(get_registry_service),
+):
+    """Tell the platform where to probe this instance (null stops probing). Same as metadata.health_url at register."""
+    return or_404(svc.set_health_url(service_id, instance_id, body.health_url), "service instance")
 
 
 @workers_router.post("/register", response_model=WorkerRead)

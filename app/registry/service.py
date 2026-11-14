@@ -7,6 +7,7 @@ from app.db.registry_repository import RegistryRepository
 from app.db.workflow_repository import WorkflowRepository
 from app.schemas.enums import InstanceStatus, WorkerStatus
 from app.schemas.registry import (
+    HealthUrlOut,
     HeartbeatIn,
     InstanceRead,
     ServiceDetail,
@@ -45,6 +46,17 @@ class RegistryService:
         self._incidents = incidents
 
     # --- services -----------------------------------------------------------------------
+
+    def set_health_url(self, service_id: uuid.UUID, instance_id: str, health_url: str | None):
+        instance = self._registry.find_instance(service_id, instance_id)
+        if instance is None:
+            return None
+        metadata = {k: v for k, v in instance.metadata_.items() if k != "health_url"}
+        if health_url:
+            metadata["health_url"] = health_url
+        instance.metadata_ = metadata  # reassign: in-place JSON mutation is not tracked
+        self._session.commit()
+        return HealthUrlOut(service_id=service_id, instance_id=instance_id, health_url=health_url)
 
     def register_service(self, body: ServiceRegisterIn) -> ServiceRegisterOut:
         now = datetime.now(UTC)

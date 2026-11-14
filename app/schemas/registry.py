@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.enums import InstanceStatus, WorkerStatus
 
@@ -85,3 +85,20 @@ class WorkerRead(BaseModel):
     last_heartbeat_at: datetime
     registered_at: datetime
     heartbeat_age_s: float
+
+
+class HealthUrlIn(BaseModel):
+    health_url: str | None = Field(default=None, max_length=500)  # null stops active probing
+
+    @field_validator("health_url")
+    @classmethod
+    def _http_only(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith(("http://", "https://")):
+            raise ValueError("health_url must start with http:// or https://")
+        return value
+
+
+class HealthUrlOut(BaseModel):
+    service_id: uuid.UUID
+    instance_id: str
+    health_url: str | None

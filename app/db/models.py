@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.db.types import JsonType, UTCDateTime
@@ -212,6 +212,7 @@ class JobRow(Base):
         Index("ix_jobs_status", "status"),
         Index("ix_jobs_workflow_run", "workflow_run_id"),
         Index("ix_jobs_workflow_run_key", "workflow_run_key"),
+        Index("ix_jobs_trace_id", "trace_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_uuid)
@@ -222,6 +223,8 @@ class JobRow(Base):
     # The SDK's run id. Job updates and workflow events travel on separate paths, so a job can
     # arrive before its run exists; the key lets the link be made when the run appears.
     workflow_run_key: Mapped[str | None] = mapped_column(String(200))
+    # Correlation id for this job's trace and logs; a column (not metadata) so jobs can be found by it.
+    trace_id: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
@@ -250,3 +253,36 @@ class IncidentRow(Base):
     dedupe_key: Mapped[str | None] = mapped_column(String(200))
     detected_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class HealthCheckRow(Base):
+    """One active probe of a service instance's health_url, with the infra figures it reported."""
+
+    __tablename__ = "health_checks"
+    __table_args__ = (Index("ix_health_checks_instance_time", "service_instance_id", "checked_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_uuid)
+    service_instance_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("service_instances.id"))
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    ok: Mapped[bool] = mapped_column(Boolean)
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    latency_ms: Mapped[float | None] = mapped_column(Float)
+    error: Mapped[str | None] = mapped_column(String(300))
+    system: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+
+
+class JobEventRow(Base):
+    """One status change of a job. The jobs row holds the current state; this holds how it got there."""
+
+    __tablename__ = "job_events"
+    __table_args__ = (Index("ix_job_events_job_time", "job_id", "occurred_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"))
+    event_type: Mapped[str] = mapped_column(String(30))
+    previous_status: Mapped[str | None] = mapped_column(String(20))
+    current_status: Mapped[str] = mapped_column(String(20))
+    service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id"))
+    worker_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workers.id"))
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    detail: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)

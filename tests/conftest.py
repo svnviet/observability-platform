@@ -5,6 +5,7 @@ import tempfile
 _db_file = os.path.join(tempfile.mkdtemp(prefix="obs-tests-"), "test.db")
 os.environ.setdefault("OBSKIT_PLATFORM_API_KEY", "test-key")
 os.environ.setdefault("OBSKIT_PLATFORM_HEARTBEAT_SCAN_INTERVAL_S", "0")  # tests trigger scans explicitly
+os.environ.setdefault("OBSKIT_PLATFORM_HEALTH_PROBE_INTERVAL_S", "0")
 os.environ.setdefault(
     "OBSKIT_PLATFORM_DATABASE_URL",
     os.environ.get("TEST_DATABASE_URL", f"sqlite:///{_db_file}"),

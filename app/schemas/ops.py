@@ -15,6 +15,7 @@ class JobUpsertIn(BaseModel):
     instance_id: str | None = Field(default=None, max_length=200)
     worker_name: str | None = Field(default=None, max_length=200)
     workflow_run_key: str | None = Field(default=None, max_length=200)
+    trace_id: str | None = Field(default=None, max_length=200)  # lets the job link straight to its trace
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: dict[str, Any] | None = None
 
@@ -31,6 +32,45 @@ class JobRead(BaseModel):
     finished_at: datetime | None
     metadata: dict[str, Any]
     error_details: dict[str, Any] | None
+    trace_id: str | None = None
+
+
+class JobEventRead(BaseModel):
+    id: uuid.UUID
+    event_type: str
+    previous_status: str | None
+    current_status: str
+    worker_id: uuid.UUID | None
+    occurred_at: datetime
+    detail: dict[str, Any]
+
+
+class JobTimeline(BaseModel):
+    job: JobRead
+    events: list[JobEventRead]
+    queued_s: float | None  # created until first started
+    running_s: float | None  # started until finished (or until now while running)
+    total_s: float | None
+
+
+class ObservabilityLink(BaseModel):
+    available: bool
+    url: str | None = None
+
+
+class JobObservability(BaseModel):
+    job_id: str
+    id: uuid.UUID
+    service_id: uuid.UUID
+    service_name: str
+    worker_id: uuid.UUID | None
+    worker_name: str | None
+    workflow_run_id: uuid.UUID | None
+    workflow_id: str | None
+    trace_id: str | None
+    logs: ObservabilityLink
+    trace: ObservabilityLink
+    metrics: ObservabilityLink
 
 
 class IncidentRead(BaseModel):

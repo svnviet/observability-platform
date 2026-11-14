@@ -22,14 +22,56 @@ cp .env.example .env            # then export the variables
   `POST /workflow-runs` (explicit, idempotent create); `POST|GET /workflows` (definitions).
 - **Registry:** `POST /services/register`, `GET /services`, `/services/{id}`, `/services/{id}/heartbeat`;
   `POST /workers/register`, `GET /workers`, `/workers/{id}`, `/workers/{id}/heartbeat`, `/workers/{id}/status`.
-- **Jobs and incidents:** `POST|GET /jobs`; `GET /incidents`, `POST /incidents/{id}/resolve`.
+- **Jobs and incidents:** `POST|GET /jobs` (filter by `status`, `service`, `external_job_id`), `GET /jobs/{id}`,
+  `/jobs/{id}/events` (every status change, with the previous status and the worker), `/jobs/{id}/timeline` (events plus
+  queue wait, run time and total) and `/jobs/{id}/observability` (links to the job's trace, logs and metrics, never the
+  data itself; the trace comes from the job's own `trace_id` or its workflow run, logs and metrics from the
+  `OBSKIT_PLATFORM_LOGS_URL_TEMPLATE` / `_METRICS_URL_TEMPLATE` settings). A repeated or refused update records nothing;
+  jobs older than the history table carry reconstructed started/finished events marked `backfilled`. `GET /incidents`, `POST /incidents/{id}/resolve`.
 - **Monitoring:** `/monitoring/overview|services|workers|queues|errors|metrics|links`, `POST /monitoring/scan`.
-- **Management UI:** `GET /ui` (static, no build step): overview, workflow explorer and detail (timeline, steps and
-  attempts, errors, trace link, event history), services, workers, error explorer, incidents. It asks for the API key
-  and keeps it for the browser tab. Runs and attempts carry a `trace_url` when `OBSKIT_PLATFORM_JAEGER_URL` is set.
+- **Management UI:** served at `/` (`/ui` redirects there; static, no build step): overview, workflow explorer and detail (timeline, steps and
+  attempts, errors, trace link, event history), services, workers, error explorer, incidents. It browses without a key and asks for the key only
+  when you change something (replay a run, resolve an incident); it keeps it for the browser tab. Runs and attempts carry a `trace_url` when `OBSKIT_PLATFORM_JAEGER_URL` is set.
 - A background scan marks instances and workers `UNHEALTHY` after `OBSKIT_PLATFORM_HEARTBEAT_TIMEOUT_S`
   without a heartbeat and opens an incident; the next heartbeat resolves it. A workflow that ends `FAILED` or
   `TIMED_OUT` also opens an incident.
+- **Retention:** the same background loop turns an `UNHEALTHY` instance/worker silent for `OBSKIT_PLATFORM_LOST_AFTER_S`
+  (default 24 h) into `STOPPED` and closes its incident, then deletes `STOPPED` ones silent for
+  `OBSKIT_PLATFORM_PURGE_AFTER_S` (default 7 days). Jobs, job events and incidents keep their history and only lose the worker link.
+- **No duplicate registrations:** registering is an upsert keyed on `(service name, environment)`, `(service, instance_id)`
+  and `(instance, worker_name)`, so duplicates only appear when a client changes one of those between runs. Clients must
+  set a fixed `OBSKIT_INSTANCE_ID` (one per process/task, never a pid or random value) and fixed environment and worker names.
+- **Active health checks and infra figures:** besides the heartbeats a service pushes, the platform probes each
+  instance's `health_url` every `OBSKIT_PLATFORM_HEALTH_PROBE_INTERVAL_S` (default 30 s) and keeps the history
+  (`OBSKIT_PLATFORM_HEALTH_RETENTION_DAYS`, default 14). `UP`/`DOWN`, latency and the figures below are recorded;
+  `OBSKIT_PLATFORM_HEALTH_FAIL_THRESHOLD` (default 3) consecutive failures open an incident and count as an outage.
+  `GET /monitoring/infra/instances` and `/infra/hosts` (`window_hours`) report uptime, outages, latency percentiles,
+  CPU/memory/disk and findings per host; the UI shows them under **Infra**. A service that missed heartbeats but still
+  answers its health URL is a client problem, not an outage, and the two views now show the difference.
+
+  Set the URL at registration (`"metadata": {"health_url": "https://svc.example.com/health"}`) or later with
+  `PUT /services/{service_id}/instances/{instance_id}/health-url` (`{"health_url": null}` stops probing). The URL must
+  be reachable from the platform; redirects are not followed and only `http`/`https` is accepted. Instances that
+  reported a clean stop are not probed.
+
+  The health response is JSON; HTTP 2xx means up (a body `status` of `down`/`error`/`fail`/`unhealthy` means down).
+  To report infra figures, include any of these numbers at the top level or under `"system"` (anything else is ignored):
+  host-level `cpu_percent`, `memory_percent`, `disk_percent`, `load_1m`, `cpu_count`, `memory_total_mb`,
+  `memory_used_mb`, `disk_total_gb`, `disk_used_gb`; service-level `process_cpu_percent`, `process_memory_mb`,
+  `active_requests`, `queue_depth`. Example (FastAPI + `psutil`):
+
+  ```python
+  @app.get("/health")
+  def health():
+      vm = psutil.virtual_memory()
+      return {"status": "ok", "system": {
+          "cpu_percent": psutil.cpu_percent(interval=None), "memory_percent": vm.percent,
+          "disk_percent": psutil.disk_usage("/").percent, "load_1m": os.getloadavg()[0],
+          "cpu_count": psutil.cpu_count(), "process_memory_mb": psutil.Process().memory_info().rss / 1e6}}
+  ```
+
+  Capacity findings are only as good as the history behind them: judge a host after it has seen a normal busy period.
+  The probe makes outbound requests to URLs that holders of the API key supply, so keep the key private.
 
 ## Ordering rules
 
@@ -44,9 +86,11 @@ higher attempt supersedes a failed lower one. `STEP_FAILED` with `data.will_retr
 - No `/api/v1` prefix (no second version exists yet).
 - Single open `GET /health` instead of `/health/live` + `/health/ready`.
 - `app/<package-per-concern>` layout instead of `apps/ domain/ repositories/`.
-- Auth is a shared `X-API-Key` header; RBAC for the UI is not built.
-- `/ui` (the static shell and its assets) is open besides `/health`: a browser cannot send a header when it navigates,
-  the shell holds no data, and it is served with a strict CSP (no inline script or style). Every data call needs the key.
+- Auth is a shared `X-API-Key` header, required only for requests that change data (POST/PUT/PATCH/DELETE) and for
+  `/openapi.json`; read-only `GET` routes are open so the UI browses without a key. Anyone who can reach the host can read
+  all registry, job, event and error data, so put it behind a private network or an access proxy if that is not acceptable.
+  RBAC for the UI is not built.
+- The UI is served at `/` and its assets at `/ui/static`, with a strict CSP (no inline script or style).
 - `/docs` and `/redoc` are disabled (they cannot send the API key). The OpenAPI schema is served at
   `GET /openapi.json` behind the key.
 - `POST /events` and `POST /events/batch` accept raw JSON objects and validate each one inside
@@ -66,3 +110,9 @@ higher attempt supersedes a failed lower one. `STEP_FAILED` with `data.will_retr
 
 RabbitMQ consumer, retention and time partitioning, role-based access, and anything that notifies people about
 incidents. Telemetry (OpenTelemetry, Prometheus, Jaeger, Perses) runs beside this service, see the observability-stack repository.
+
+## Integrating other services
+
+`integrations/claude-skill/obs-integration/` is a Claude skill meant to be copied into **other** services'
+repos so they can connect to this platform (register, heartbeat, health, workers, jobs, workflow events,
+trace ids). It is not used by this repo itself; see `integrations/claude-skill/README.md`.

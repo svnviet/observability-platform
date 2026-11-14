@@ -2,17 +2,18 @@ import logging
 import threading
 from datetime import UTC, datetime
 
-from app.core.config import heartbeat_scan_interval_s, heartbeat_timeout_s
+from app.core.config import heartbeat_scan_interval_s, heartbeat_timeout_s, lost_after_s, purge_after_s
 from app.db.incident_repository import IncidentRepository
 from app.db.registry_repository import RegistryRepository
 from app.db.session import Database, get_database
 from app.registry.heartbeat import HeartbeatMonitor
+from app.registry.retention import RegistryRetention
 
 log = logging.getLogger("observability_platform.heartbeat")
 
 
 class HeartbeatScheduler:
-    """Runs HeartbeatMonitor.scan on a timer in a daemon thread."""
+    """Runs HeartbeatMonitor.scan, then RegistryRetention.sweep, on a timer in a daemon thread."""
 
     def __init__(self, database: Database, interval_s: float, timeout_s: float) -> None:
         self._database = database
@@ -43,9 +44,13 @@ class HeartbeatScheduler:
                 monitor = HeartbeatMonitor(
                     session, RegistryRepository(session), IncidentRepository(session), self._timeout
                 )
-                monitor.scan(datetime.now(UTC))
+                now = datetime.now(UTC)
+                monitor.scan(now)
+                RegistryRetention(
+                    session, RegistryRepository(session), IncidentRepository(session), lost_after_s(), purge_after_s()
+                ).sweep(now)
             except Exception:  # a failed scan must not end the loop
-                log.exception("heartbeat scan failed")
+                log.exception("heartbeat scan or retention sweep failed")
                 session.rollback()
             finally:
                 session.close()

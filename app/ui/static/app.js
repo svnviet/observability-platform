@@ -19,8 +19,10 @@ const keyError = document.getElementById("key-error");
 const SECTIONS = [
   ["overview", "Overview"],
   ["workflows", "Workflows"],
+  ["jobs", "Jobs"],
   ["services", "Services"],
   ["workers", "Workers"],
+  ["infra", "Infra"],
   ["errors", "Errors"],
   ["incidents", "Incidents"],
 ];
@@ -78,10 +80,24 @@ let links = {};
 
 class AuthError extends Error {}
 
+// Reads need no key. A write that is refused asks for the key, then the user repeats the action.
+async function act(path, options) {
+  try {
+    await api(path, options);
+  } catch (err) {
+    if (!(err instanceof AuthError)) throw err;
+    sessionStorage.removeItem("obskit-key");
+    apiKey = "";
+    askForKey("Changing data needs the API key.");
+    return;
+  }
+  route();
+}
+
 async function api(path, { method = "GET", body } = {}) {
   const res = await fetch(path, {
     method,
-    headers: { "X-API-Key": apiKey, ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { ...(apiKey ? { "X-API-Key": apiKey } : {}), ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) throw new AuthError();
@@ -107,7 +123,7 @@ document.getElementById("key-form").addEventListener("submit", async (event) => 
   const previous = apiKey;
   apiKey = candidate;
   try {
-    await api("/monitoring/links");
+    await api("/auth/check");
     sessionStorage.setItem("obskit-key", apiKey);
     route();
   } catch (err) {
@@ -146,11 +162,6 @@ async function route() {
   const myRender = ++renderId;
   const { name, id } = parseHash();
   renderNav(name);
-  if (!apiKey) {
-    view.replaceChildren(h("p", { class: "empty" }, "Enter the API key to connect."));
-    askForKey();
-    return;
-  }
   const scroll = window.scrollY;
   try {
     if (!Object.keys(links).length) {
@@ -164,12 +175,6 @@ async function route() {
     if (page.live) timer = setTimeout(route, REFRESH_MS);
   } catch (err) {
     if (myRender !== renderId) return;
-    if (err instanceof AuthError) {
-      sessionStorage.removeItem("obskit-key");
-      apiKey = "";
-      askForKey("The key was rejected. Enter it again.");
-      return;
-    }
     view.replaceChildren(h("div", { class: "panel bad" }, h("strong", null, "Could not load this page. "), String(err.message || err)));
   }
 }
@@ -406,8 +411,8 @@ function replayButton(id) {
     }
     button.disabled = true;
     try {
-      await api("/events/replay", { method: "POST", body: { workflow_run_ids: [id] } });
-      route();
+      await act("/events/replay", { method: "POST", body: { workflow_run_ids: [id] } });
+      button.disabled = false;
     } catch (err) {
       button.disabled = false;
       button.textContent = `Failed: ${err.message}`;
@@ -443,6 +448,160 @@ async function servicesPage() {
         ),
       ]),
       "No services have registered yet.",
+    ),
+  ];
+  return { content, live: true, keepScroll: true };
+}
+
+const jobFilter = { status: "", service: "", external_job_id: "", offset: 0 };
+const shortId = (id) => (id ? String(id).slice(0, 8) : "–");
+const seconds = (v) => (v === null || v === undefined ? "–" : formatDuration(v * 1000));
+
+async function jobsPage() {
+  const query = buildQuery({
+    status: jobFilter.status,
+    service: jobFilter.service.trim(),
+    external_job_id: jobFilter.external_job_id.trim(),
+    limit: PAGE,
+    offset: jobFilter.offset,
+  });
+  const page = await api(`/jobs${query}`);
+  const statuses = ["", "QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"];
+  const content = [
+    h("h1", null, "Job explorer"),
+    h(
+      "form",
+      { class: "filters", onsubmit: (event) => { event.preventDefault(); const f = new FormData(event.target); Object.assign(jobFilter, { external_job_id: f.get("job"), status: f.get("status"), service: f.get("service"), offset: 0 }); route(); } },
+      field("Job id", h("input", { name: "job", value: jobFilter.external_job_id, placeholder: "job-123" })),
+      field("Status", h("select", { name: "status" }, statuses.map((s) => h("option", { value: s, selected: s === jobFilter.status }, s || "Any")))),
+      field("Service", h("input", { name: "service", value: jobFilter.service, placeholder: "video-service" })),
+      h("button", { type: "submit", class: "primary" }, "Search"),
+      h("button", { type: "button", class: "ghost", onclick: () => { Object.assign(jobFilter, { status: "", service: "", external_job_id: "", offset: 0 }); route(); } }, "Clear"),
+    ),
+    table(
+      ["Job", "Service", "Status", "Created", "Run time", "Error"],
+      page.items.map((j) =>
+        h("tr", null,
+          h("td", null, link(`#/jobs/${j.id}`, j.external_job_id)),
+          h("td", null, j.service_name),
+          h("td", null, chip(j.status)),
+          h("td", null, formatTime(j.created_at)),
+          h("td", null, j.started_at && j.finished_at ? formatDuration(new Date(j.finished_at) - new Date(j.started_at)) : "–"),
+          h("td", null, j.error_details ? String(j.error_details.message || j.error_details.type || "error").slice(0, 80) : "–"),
+        ),
+      ),
+      "No jobs match.",
+    ),
+    pager(page, (offset) => { jobFilter.offset = offset; route(); }),
+  ];
+  return { content, live: false };
+}
+
+async function jobDetailPage(id) {
+  const [timeline, obs] = await Promise.all([api(`/jobs/${id}/timeline`), api(`/jobs/${id}/observability`)]);
+  const job = timeline.job;
+  const openLink = (info, label) => (info.available ? link(info.url, label, true) : h("span", { class: "muted" }, `${label}: not available`));
+  const content = [
+    h("p", null, link("#/jobs", "← All jobs")),
+    h("h1", null, job.external_job_id, " ", chip(job.status)),
+    h("div", { class: "tiles" },
+      tile("Waited in queue", seconds(timeline.queued_s)),
+      tile("Running", seconds(timeline.running_s)),
+      tile("Total", seconds(timeline.total_s)),
+    ),
+    section(
+      "Where to look",
+      h("ul", null,
+        h("li", null, "Service: ", h("strong", null, obs.service_name)),
+        h("li", null, "Worker: ", obs.worker_name ? h("strong", null, obs.worker_name) : "–"),
+        h("li", null, "Workflow: ", obs.workflow_run_id ? link(`#/workflows/${obs.workflow_run_id}`, obs.workflow_id || shortId(obs.workflow_run_id)) : "–"),
+        h("li", null, "Trace id: ", mono(obs.trace_id || "–")),
+      ),
+      h("p", null, openLink(obs.trace, "Open trace"), " · ", openLink(obs.logs, "Open logs"), " · ", openLink(obs.metrics, "Open metrics")),
+    ),
+    job.error_details ? section("Error", h("pre", { class: "mono" }, JSON.stringify(job.error_details, null, 2))) : null,
+    section(
+      "Lifecycle history",
+      table(
+        ["Time", "Event", "From", "To", "Note"],
+        timeline.events.map((e) =>
+          h("tr", null,
+            h("td", null, formatTime(e.occurred_at)),
+            h("td", null, mono(e.event_type)),
+            h("td", null, e.previous_status ? chip(e.previous_status) : "–"),
+            h("td", null, chip(e.current_status)),
+            h("td", null, e.detail && e.detail.backfilled ? "reconstructed from timestamps" : e.detail && e.detail.error ? String(e.detail.error.message || e.detail.error.type || "") : ""),
+          ),
+        ),
+        "No lifecycle events recorded.",
+      ),
+    ),
+  ];
+  return { content, live: timeline.job.status === "RUNNING" || timeline.job.status === "QUEUED", keepScroll: true };
+}
+
+const infraWindow = { hours: 24 };
+const pct = (v) => (v === undefined || v === null ? "–" : `${Math.round(v)}%`);
+const ms = (v) => (v === undefined || v === null ? "–" : `${Math.round(v)} ms`);
+const hot = (v, limit) => (v !== undefined && v >= limit ? "bad" : "");
+
+async function infraPage() {
+  const query = buildQuery({ window_hours: infraWindow.hours });
+  const [hosts, instances] = await Promise.all([api(`/monitoring/infra/hosts${query}`), api(`/monitoring/infra/instances${query}`)]);
+  const down = instances.filter((i) => i.state === "DOWN").length;
+  const withUrl = instances.filter((i) => i.health_url).length;
+  const content = [
+    h("h1", null, "Infrastructure"),
+    h(
+      "form",
+      { class: "filters", onsubmit: (event) => { event.preventDefault(); infraWindow.hours = Number(new FormData(event.target).get("hours")); route(); } },
+      field("Window", h("select", { name: "hours" }, [[1, "1 hour"], [6, "6 hours"], [24, "24 hours"], [168, "7 days"], [720, "30 days"]].map(([v, label]) => h("option", { value: v, selected: v === infraWindow.hours }, label)))),
+      h("button", { type: "submit", class: "primary" }, "Apply"),
+    ),
+    h("div", { class: "tiles" },
+      tile("Hosts", hosts.length),
+      tile("Probed instances", withUrl, `${instances.length - withUrl} without a health_url`),
+      tile("Down now", down, null, down ? "bad" : "good"),
+      tile("Outages", hosts.reduce((n, x) => n + x.outages_total, 0), `in ${infraWindow.hours} h`, hosts.some((x) => x.outages_total) ? "warn" : "good"),
+    ),
+    section(
+      "Hosts",
+      table(
+        ["Host", "Services", "Uptime (worst)", "Outages", "CPU p95", "Memory p95", "Disk p95", "Findings"],
+        hosts.map((x) =>
+          h("tr", null,
+            h("td", null, h("strong", null, x.hostname)),
+            h("td", null, x.services.join(", ")),
+            h("td", null, x.uptime_pct_min === null ? "–" : `${x.uptime_pct_min}%`),
+            h("td", null, x.outages_total),
+            h("td", { class: hot(x.system_p95.cpu_percent, 80) }, pct(x.system_p95.cpu_percent)),
+            h("td", { class: hot(x.system_p95.memory_percent, 85) }, pct(x.system_p95.memory_percent)),
+            h("td", { class: hot(x.system_p95.disk_percent, 85) }, pct(x.system_p95.disk_percent)),
+            h("td", null, x.findings.length ? h("ul", null, x.findings.map((f) => h("li", null, f))) : "No issues"),
+          )),
+        "No health checks recorded yet. Register a health_url for an instance.",
+      ),
+    ),
+    section(
+      "Instances",
+      table(
+        ["Service", "Instance", "Host", "State", "Uptime", "Latency p50 / p95", "CPU", "Memory", "Disk", "Outages", "Last error"],
+        instances.map((i) =>
+          h("tr", null,
+            h("td", null, h("strong", null, i.service_name)),
+            h("td", null, mono(i.instance_id)),
+            h("td", null, i.hostname || "–"),
+            h("td", null, chip(i.state === "UP" ? "HEALTHY" : i.state === "DOWN" ? "UNHEALTHY" : "UNKNOWN")),
+            h("td", null, i.uptime_pct === null ? "–" : `${i.uptime_pct}%`),
+            h("td", null, `${ms(i.latency_p50_ms)} / ${ms(i.latency_p95_ms)}`),
+            h("td", null, pct(i.system_latest.cpu_percent)),
+            h("td", null, pct(i.system_latest.memory_percent)),
+            h("td", null, pct(i.system_latest.disk_percent)),
+            h("td", null, i.outages.length ? i.outages.map((o) => `${formatTime(o.started_at)} (${formatDuration(o.duration_s * 1000)}${o.ended_at ? "" : ", ongoing"})`).join("; ") : "–"),
+            h("td", null, i.last_error || "–"),
+          )),
+        "No instances registered.",
+      ),
     ),
   ];
   return { content, live: true, keepScroll: true };
@@ -525,7 +684,7 @@ async function incidentsPage() {
           h("td", null, h("strong", null, i.title), i.description ? h("div", { class: "small muted" }, i.description) : null, i.workflow_run_id ? link(`#/workflows/${i.workflow_run_id}`, "View run") : null),
           h("td", null, formatTime(i.detected_at)),
           h("td", null, chip(i.status), i.resolved_at ? h("div", { class: "small muted" }, formatTime(i.resolved_at)) : null),
-          h("td", null, i.status === "OPEN" ? h("button", { class: "ghost", type: "button", onclick: async () => { await api(`/incidents/${i.id}/resolve`, { method: "POST" }); route(); } }, "Resolve") : null),
+          h("td", null, i.status === "OPEN" ? h("button", { class: "ghost", type: "button", onclick: () => act(`/incidents/${i.id}/resolve`, { method: "POST" }) }, "Resolve") : null),
         ),
       ),
       "No incidents.",
@@ -537,8 +696,10 @@ async function incidentsPage() {
 const PAGES = {
   overview: overviewPage,
   workflows: (id) => (id ? workflowDetailPage(id) : workflowsPage()),
+  jobs: (id) => (id ? jobDetailPage(id) : jobsPage()),
   services: servicesPage,
   workers: workersPage,
+  infra: infraPage,
   errors: errorsPage,
   incidents: incidentsPage,
 };

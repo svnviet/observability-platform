@@ -214,9 +214,9 @@ def test_rejected_events_are_listable(client):
     assert page["total"] == 1 and page["items"][0]["raw"]["event_id"] == "bad-1" and page["items"][0]["error"]
 
 
-def test_new_routes_require_api_key(anon_client):
-    for path in ("/services", "/workers", "/jobs", "/incidents", "/monitoring/overview", "/workflows"):
-        assert anon_client.get(path).status_code == 401
+def test_new_write_routes_require_api_key(anon_client):
+    for path in ("/services/register", "/workers/register", "/jobs", "/monitoring/scan", "/workflows"):
+        assert anon_client.post(path, json={}).status_code == 401
 
 
 def test_trace_links_and_tool_links_follow_configuration(client, monkeypatch):
@@ -235,3 +235,49 @@ def test_trace_links_and_tool_links_follow_configuration(client, monkeypatch):
         "perses_url": "http://perses.local",
         "prometheus_url": None,
     }
+
+
+def _retention(lost_after_s: float, purge_after_s: float, now: datetime | None = None):
+    from app.db.incident_repository import IncidentRepository
+    from app.db.registry_repository import RegistryRepository
+    from app.registry.retention import RegistryRetention
+
+    session = get_database().session()
+    try:
+        sweep = RegistryRetention(
+            session, RegistryRepository(session), IncidentRepository(session), lost_after_s, purge_after_s
+        )
+        return sweep.sweep(now or datetime.now(UTC))
+    finally:
+        session.close()
+
+
+def test_retention_stops_lost_entries_then_purges_them(client):
+    w = client.post("/workers/register", json=WORKER).json()
+    client.post(f"/workers/{w['id']}/heartbeat", json={"status": "IDLE"})
+    age_heartbeats(60)
+    client.post("/monitoring/scan")
+    assert client.get("/incidents", params={"status": "OPEN"}).json()["total"] == 2
+
+    # not silent long enough yet: nothing changes
+    assert _retention(3600, 7200).instances_stopped == 0
+    later = datetime.now(UTC) + timedelta(hours=2)
+    result = _retention(3600, 0, later)  # purge disabled
+    assert (result.instances_stopped, result.workers_stopped, result.instances_purged) == (1, 1, 0)
+    assert client.get("/incidents", params={"status": "OPEN"}).json()["total"] == 0
+    assert client.get("/workers").json()[0]["status"] == "STOPPED"
+
+    result = _retention(3600, 7200, later + timedelta(hours=3))
+    assert (result.instances_purged, result.workers_purged) == (1, 1)
+    assert client.get("/workers").json() == []
+    assert client.get("/services").json()[0]["instances_total"] == 0
+
+
+def test_retention_keeps_healthy_and_recent_entries(client):
+    client.post("/services/register", json=INSTANCE)
+    stopped = {**INSTANCE, "instance_id": "vg-02"}
+    sid = client.post("/services/register", json=stopped).json()["service_id"]
+    client.post(f"/services/{sid}/heartbeat", json={"instance_id": "vg-02", "stopping": True})
+    result = _retention(3600, 7200, datetime.now(UTC) + timedelta(hours=1))
+    assert (result.instances_stopped, result.instances_purged) == (0, 0)
+    assert client.get("/services").json()[0]["instances_total"] == 2

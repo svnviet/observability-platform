@@ -3,12 +3,15 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.auth.api_key import require_api_key
+from app.auth.api_key import require_api_key, require_api_key_for_writes
+from app.auth.router import router as auth_router
 from app.events.router import router as events_router
+from app.failures.router import router as failures_router
 from app.incidents.router import router as incidents_router
 from app.jobs.router import router as jobs_router
 from app.monitoring.router import router as monitoring_router
 from app.registry.router import services_router, workers_router
+from app.registry.probe_scheduler import HealthProbeScheduler
 from app.registry.scheduler import HeartbeatScheduler
 from app.ui.router import STATIC_DIR
 from app.ui.router import router as ui_router
@@ -20,7 +23,10 @@ from app.workflows.router import router as workflows_router
 async def lifespan(app: FastAPI):
     scheduler = HeartbeatScheduler.from_config()
     scheduler.start()
+    prober = HealthProbeScheduler.from_config()
+    prober.start()
     yield
+    prober.stop()
     scheduler.stop()
 
 
@@ -48,10 +54,12 @@ for router in (
     jobs_router,
     incidents_router,
     monitoring_router,
+    failures_router,
 ):
-    app.include_router(router, dependencies=[Depends(require_api_key)])
+    app.include_router(router, dependencies=[Depends(require_api_key_for_writes)])
+app.include_router(auth_router)
 
-# The management UI shell is static and carries no data; the page asks for the API key and sends it
-# with every data request. It is the one deliberate exception to "only /health is open".
+# The management UI is served at / and browses read-only data without a key. Only requests that change
+# data (POST/PUT/PATCH/DELETE) and /openapi.json need the API key.
 app.include_router(ui_router)
 app.mount("/ui/static", StaticFiles(directory=STATIC_DIR), name="ui-static")
