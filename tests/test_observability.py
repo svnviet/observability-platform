@@ -42,7 +42,9 @@ def test_incident_links_carry_a_bounded_time_window(client, monkeypatch):
     seen = client.get(f"/incidents/{incidents[0]['id']}/observability").json()
     assert seen["entity"]["type"] == "incident"
     assert "from" not in seen["correlation"] and "to" not in seen["correlation"]  # window is for the URL only
-    assert seen["links"]["logs"]["available"] is False  # {service} has no value: this incident belongs to a run
+    url = seen["links"]["logs"]["url"]  # the incident's service and a bounded millisecond window fill the template
+    params = dict(p.split("=") for p in url.split("?")[1].split("&"))
+    assert params["svc"] == "video-generator" and int(params["to"]) - int(params["from"]) <= 24 * 3600 * 1000
 
 
 def test_unknown_entities_are_404_and_reads_are_open(client, anon_client):

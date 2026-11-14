@@ -33,7 +33,7 @@ def test_ui_browses_without_a_key_but_cannot_write(anon_client):
 
 
 def test_ui_script_never_parses_data_as_html():
-    source = (UI_DIR / "app.js").read_text()
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
     for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert forbidden not in source
 
@@ -49,6 +49,6 @@ def test_ui_helper_functions_pass_node_tests():
 
 def test_ui_script_never_sets_inline_style_strings():
     """The CSP blocks `style="..."` attributes, so bars would silently collapse; only CSSOM objects work."""
-    source = (UI_DIR / "app.js").read_text()
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
     assert not re.search(r"style:\s*[`\"']", source)
     assert 'setAttribute("style"' not in source

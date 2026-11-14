@@ -195,7 +195,7 @@ def test_monitoring_overview_queues_errors_metrics(client):
     assert (q["service_name"], q["queued"], q["running"]) == ("video-generator", 1, 1)
     assert q["oldest_queued_age_s"] is not None
 
-    [g] = client.get("/monitoring/errors").json()
+    [g] = client.get("/monitoring/errors", params={"window_hours": 2160}).json()  # events carry a fixed 2026-11-09 date
     assert (g["exception_type"], g["service_name"], g["workflow_name"], g["count"]) == (
         "TimeoutError", "video-generator", "pipeline", 1)  # fmt: skip
 
