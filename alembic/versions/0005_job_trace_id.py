@@ -29,5 +29,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        # Put the ids back where the previous release reads them, so rolling back loses no trace links.
+        op.execute(
+            """
+            UPDATE jobs SET metadata = metadata || jsonb_build_object('trace_id', trace_id)
+            WHERE trace_id IS NOT NULL
+            """
+        )
     op.drop_index("ix_jobs_trace_id", table_name="jobs")
     op.drop_column("jobs", "trace_id")

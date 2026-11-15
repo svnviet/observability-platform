@@ -75,5 +75,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Lossy by nature: the job history table is dropped with its rows (jobs themselves are untouched).
     op.drop_index("ix_job_events_job_time", table_name="job_events")
     op.drop_table("job_events")
