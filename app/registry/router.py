@@ -3,22 +3,27 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 
 from app.core.config import default_page_size, max_page_size
-from app.core.errors import or_404
+from app.core.errors import Conflict, conflict_409, or_404
 from app.registry.deps import get_registry_service
 from app.registry.service import RegistryService
 from app.schemas.enums import WorkerStatus
 from app.schemas.registry import (
+    DeleteResult,
     HealthUrlIn,
     HealthUrlOut,
     HeartbeatIn,
+    InstanceRead,
+    InstanceUpdateIn,
     ServiceDetail,
     ServiceRead,
     ServiceRegisterIn,
     ServiceRegisterOut,
+    ServiceUpdateIn,
     WorkerHeartbeatIn,
     WorkerRead,
     WorkerRegisterIn,
     WorkerStatusIn,
+    WorkerUpdateIn,
 )
 
 services_router = APIRouter(prefix="/services", tags=["services"])
@@ -38,6 +43,45 @@ def list_services(svc: RegistryService = Depends(get_registry_service)):
 @services_router.get("/{service_id}", response_model=ServiceDetail)
 def get_service(service_id: uuid.UUID, svc: RegistryService = Depends(get_registry_service)):
     return or_404(svc.get_service(service_id), "service")
+
+
+@services_router.patch("/{service_id}", response_model=ServiceDetail)
+def update_service(
+    service_id: uuid.UUID, body: ServiceUpdateIn, svc: RegistryService = Depends(get_registry_service)
+):
+    """Edit a service's version and metadata. Name and environment are its identity and do not change."""
+    return or_404(svc.update_service(service_id, body), "service")
+
+
+@services_router.delete("/{service_id}", response_model=DeleteResult)
+def delete_service(
+    service_id: uuid.UUID,
+    delete_jobs: bool = Query(False, description="Also delete the service's jobs; without it a service with jobs is refused"),
+    svc: RegistryService = Depends(get_registry_service),
+):
+    """Remove a service whose instances are all stopped. 409 while one is alive, or while it has jobs."""
+    try:
+        return or_404(svc.delete_service(service_id, delete_jobs=delete_jobs), "service")
+    except Conflict as exc:
+        raise conflict_409(exc) from exc
+
+
+@services_router.patch("/{service_id}/instances/{instance_id}", response_model=InstanceRead)
+def update_instance(
+    service_id: uuid.UUID,
+    instance_id: str,
+    body: InstanceUpdateIn,
+    svc: RegistryService = Depends(get_registry_service),
+):
+    return or_404(svc.update_instance(service_id, instance_id, body), "service instance")
+
+
+@services_router.delete("/{service_id}/instances/{instance_id}", response_model=DeleteResult)
+def delete_instance(
+    service_id: uuid.UUID, instance_id: str, svc: RegistryService = Depends(get_registry_service)
+):
+    """Remove one instance and its workers. Jobs and incidents keep their history."""
+    return or_404(svc.delete_instance(service_id, instance_id), "service instance")
 
 
 @services_router.post("/{service_id}/heartbeat", response_model=ServiceRegisterOut)
@@ -77,6 +121,19 @@ def list_workers(
 @workers_router.get("/{worker_id}", response_model=WorkerRead)
 def get_worker(worker_id: uuid.UUID, svc: RegistryService = Depends(get_registry_service)):
     return or_404(svc.get_worker(worker_id), "worker")
+
+
+@workers_router.patch("/{worker_id}", response_model=WorkerRead)
+def update_worker(
+    worker_id: uuid.UUID, body: WorkerUpdateIn, svc: RegistryService = Depends(get_registry_service)
+):
+    return or_404(svc.update_worker(worker_id, body), "worker")
+
+
+@workers_router.delete("/{worker_id}", response_model=DeleteResult)
+def delete_worker(worker_id: uuid.UUID, svc: RegistryService = Depends(get_registry_service)):
+    """Remove one worker. Its jobs stay and only lose the link to it."""
+    return or_404(svc.delete_worker(worker_id), "worker")
 
 
 @workers_router.post("/{worker_id}/heartbeat", response_model=WorkerRead)

@@ -4,9 +4,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 
 from app.core.config import default_page_size, max_page_size
-from app.core.errors import or_404
+from app.core.errors import Conflict, conflict_409, or_404
 from app.schemas.enums import WorkflowStatus
 from app.schemas.ops import WorkflowRunCreateIn
+from app.schemas.registry import DeleteResult
 from app.schemas.workflows import (
     EventRead,
     Page,
@@ -54,6 +55,19 @@ def search_runs(
 @router.get("/{run_id}", response_model=WorkflowRunDetail)
 def get_run(run_id: uuid.UUID, svc: WorkflowQueryService = Depends(get_query_service)):
     return or_404(svc.detail(run_id), "workflow run")
+
+
+@router.delete("/{run_id}", response_model=DeleteResult)
+def delete_run(
+    run_id: uuid.UUID,
+    force: bool = Query(False, description="Required to delete a run that has not finished"),
+    svc: WorkflowCatalogService = Depends(get_catalog_service),
+):
+    """Remove a run with its steps and event log. Jobs and incidents keep their history."""
+    try:
+        return or_404(svc.delete_run(run_id, force=force), "workflow run")
+    except Conflict as exc:
+        raise conflict_409(exc) from exc
 
 
 @router.get("/{run_id}/timeline", response_model=list[TimelineEntry])

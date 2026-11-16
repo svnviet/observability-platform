@@ -17,6 +17,20 @@ PUT  /services/{service_id}/instances/{instance_id}/health-url   {"health_url":"
 ```
 Re-registering the same `(service_name, environment)` + `instance_id` is an upsert.
 
+Edit and remove (all need `X-API-Key`):
+```
+PATCH  /services/{service_id}                          {"version":"1.3.0","metadata":{"team":"media","old_key":null}}
+PATCH  /services/{service_id}/instances/{instance_id}  {"hostname":"host-b","metadata":{"health_url":"https://..."}}
+DELETE /services/{service_id}/instances/{instance_id}  # any state; removes its workers; jobs keep their history
+DELETE /services/{service_id}[?delete_jobs=true]       # 409 while an instance is not STOPPED, or while jobs exist
+PATCH  /workers/{worker_id}                            {"capacity":4,"worker_type":"render","metadata":{}}
+DELETE /workers/{worker_id}
+DELETE /workflow-runs/{run_id}[?force=true]            # force is required for a run that has not finished
+```
+Only the fields sent change; `metadata` is merged and a key set to `null` is removed. `service_name` and
+`environment` are the identity and cannot be edited. Use these to clean up after yourself (a retired instance,
+a test run); never delete another service's records.
+
 ## Workers
 
 ```

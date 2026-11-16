@@ -1,15 +1,17 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import and_, exists, func, select, update
+from sqlalchemy import and_, delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.models import (
+    IncidentRow,
     JobRow,
     ServiceRow,
     StepAttemptRow,
     WorkflowDefinitionRow,
+    WorkflowEventRow,
     WorkflowRunRow,
     WorkflowStepRow,
 )
@@ -157,6 +159,24 @@ class WorkflowRepository:
         self._session.flush()
 
     # --- read side --------------------------------------------------------------------
+
+    def delete_run(self, run: WorkflowRunRow) -> int:
+        """Delete a run with its steps, attempts and event log. Returns how many events went with it.
+
+        Jobs and incidents stay and only lose the link to the run.
+        """
+        step_ids = select(WorkflowStepRow.id).where(WorkflowStepRow.workflow_run_id == run.id)
+        events = self._session.execute(
+            delete(WorkflowEventRow).where(WorkflowEventRow.workflow_run_id == run.id)
+        ).rowcount
+        self._session.execute(delete(StepAttemptRow).where(StepAttemptRow.workflow_step_id.in_(step_ids)))
+        self._session.execute(delete(WorkflowStepRow).where(WorkflowStepRow.workflow_run_id == run.id))
+        self._session.execute(update(JobRow).where(JobRow.workflow_run_id == run.id).values(workflow_run_id=None))
+        self._session.execute(
+            update(IncidentRow).where(IncidentRow.workflow_run_id == run.id).values(workflow_run_id=None)
+        )
+        self._session.execute(delete(WorkflowRunRow).where(WorkflowRunRow.id == run.id))
+        return events
 
     def get_run(self, run_id: uuid.UUID) -> WorkflowRunRow | None:
         return self._session.get(WorkflowRunRow, run_id)

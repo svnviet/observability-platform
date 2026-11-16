@@ -2,9 +2,13 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.core.errors import Conflict
 from app.db.models import WorkflowRunRow
 from app.db.workflow_repository import WorkflowRepository
+from app.events.state_machine import WORKFLOW_TERMINAL
+from app.schemas.enums import WorkflowStatus
 from app.schemas.ops import WorkflowDefinitionIn, WorkflowDefinitionRead, WorkflowRunCreateIn
+from app.schemas.registry import DeleteResult
 from app.schemas.workflows import WorkflowRunRead
 from app.workflows.service import _run
 
@@ -43,3 +47,18 @@ class WorkflowCatalogService:
             run.input_metadata = {**run.input_metadata, **body.input_metadata}
         self._session.commit()
         return _run(self._workflows.get_run_with_steps(run.id))
+
+    def delete_run(self, run_id: uuid.UUID, *, force: bool) -> DeleteResult | None:
+        """Remove a run and its event log, e.g. a test run abandoned mid-way.
+
+        A run that has not finished is refused unless `force`: it may still be running, and deleting it
+        only hides it until its next event recreates it.
+        """
+        run = self._workflows.get_run(run_id)
+        if run is None:
+            return None
+        if WorkflowStatus(run.status) not in WORKFLOW_TERMINAL and not force:
+            raise Conflict(f"run is {run.status}; pass force=true to delete a run that has not finished")
+        events = self._workflows.delete_run(run)
+        self._session.commit()
+        return DeleteResult(deleted="workflow_run", events=events)

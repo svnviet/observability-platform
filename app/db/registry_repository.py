@@ -2,11 +2,20 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import HealthCheckRow, IncidentRow, JobEventRow, JobRow, ServiceInstanceRow, ServiceRow, WorkerRow
+from app.db.models import (
+    HealthCheckRow,
+    IncidentRow,
+    JobEventRow,
+    JobRow,
+    ServiceInstanceRow,
+    ServiceRow,
+    WorkerRow,
+    WorkflowStepRow,
+)
 from app.schemas.enums import InstanceStatus, WorkerStatus
 
 
@@ -217,17 +226,61 @@ class RegistryRepository:
                 )
             )
         )
-        if worker_ids:
-            self._session.execute(update(JobRow).where(JobRow.worker_id.in_(worker_ids)).values(worker_id=None))
-            self._session.execute(
-                update(JobEventRow).where(JobEventRow.worker_id.in_(worker_ids)).values(worker_id=None)
-            )
-            self._session.execute(
-                update(IncidentRow).where(IncidentRow.worker_id.in_(worker_ids)).values(worker_id=None)
-            )
-            self._session.execute(delete(WorkerRow).where(WorkerRow.id.in_(worker_ids)))
+        self.delete_workers(worker_ids)
         self._session.execute(delete(HealthCheckRow).where(HealthCheckRow.service_instance_id.in_(instance_ids)))
         instances = self._session.execute(
             delete(ServiceInstanceRow).where(ServiceInstanceRow.id.in_(instance_ids))
         ).rowcount
         return instances, len(worker_ids)
+
+    # --- explicit deletes ---------------------------------------------------------------
+
+    def worker_ids_of(self, instance_row_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+        if not instance_row_ids:
+            return []
+        return list(
+            self._session.scalars(select(WorkerRow.id).where(WorkerRow.service_instance_id.in_(instance_row_ids)))
+        )
+
+    def delete_workers(self, worker_ids: list[uuid.UUID]) -> int:
+        """Jobs, job events and incidents keep their history; they only lose the link to the worker."""
+        if not worker_ids:
+            return 0
+        self._session.execute(update(JobRow).where(JobRow.worker_id.in_(worker_ids)).values(worker_id=None))
+        self._session.execute(
+            update(JobEventRow).where(JobEventRow.worker_id.in_(worker_ids)).values(worker_id=None)
+        )
+        self._session.execute(
+            update(IncidentRow).where(IncidentRow.worker_id.in_(worker_ids)).values(worker_id=None)
+        )
+        return self._session.execute(delete(WorkerRow).where(WorkerRow.id.in_(worker_ids))).rowcount
+
+    def delete_instances(self, instance_row_ids: list[uuid.UUID]) -> tuple[int, int]:
+        """Delete instances with their workers and probe history. Returns (instances, workers)."""
+        if not instance_row_ids:
+            return 0, 0
+        workers = self.delete_workers(self.worker_ids_of(instance_row_ids))
+        self._session.execute(
+            delete(HealthCheckRow).where(HealthCheckRow.service_instance_id.in_(instance_row_ids))
+        )
+        instances = self._session.execute(
+            delete(ServiceInstanceRow).where(ServiceInstanceRow.id.in_(instance_row_ids))
+        ).rowcount
+        return instances, workers
+
+    def count_jobs(self, service_id: uuid.UUID) -> int:
+        return self._session.scalar(select(func.count()).select_from(JobRow).where(JobRow.service_id == service_id)) or 0
+
+    def delete_service(self, service: ServiceRow) -> int:
+        """Delete a service that has no instances left. Its jobs go with it (returns how many);
+        incidents and workflow steps stay and only lose the link to the service."""
+        self._session.execute(delete(JobEventRow).where(JobEventRow.service_id == service.id))
+        jobs = self._session.execute(delete(JobRow).where(JobRow.service_id == service.id)).rowcount
+        self._session.execute(
+            update(IncidentRow).where(IncidentRow.service_id == service.id).values(service_id=None)
+        )
+        self._session.execute(
+            update(WorkflowStepRow).where(WorkflowStepRow.service_id == service.id).values(service_id=None)
+        )
+        self._session.delete(service)
+        return jobs

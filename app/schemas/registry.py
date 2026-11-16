@@ -34,6 +34,7 @@ class InstanceRead(BaseModel):
     last_heartbeat_at: datetime
     registered_at: datetime
     heartbeat_age_s: float
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ServiceRead(BaseModel):
@@ -48,7 +49,48 @@ class ServiceRead(BaseModel):
 
 
 class ServiceDetail(ServiceRead):
+    metadata: dict[str, Any] = Field(default_factory=dict)
     instances: list[InstanceRead]
+
+
+def _check_health_url(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    url = (metadata or {}).get("health_url")
+    if url is not None and not (isinstance(url, str) and url.startswith(("http://", "https://"))):
+        raise ValueError("metadata.health_url must start with http:// or https://")
+    return metadata
+
+
+class ServiceUpdateIn(BaseModel):
+    """Only the fields given change. `metadata` is merged; a key set to null is removed.
+
+    Name and environment are the service's identity and cannot be edited: register under the new name instead.
+    """
+
+    version: str | None = Field(default=None, max_length=100)
+    metadata: dict[str, Any] | None = None
+
+
+class InstanceUpdateIn(BaseModel):
+    hostname: str | None = Field(default=None, max_length=200)
+    metadata: dict[str, Any] | None = None
+
+    _health_url = field_validator("metadata")(_check_health_url)
+
+
+class WorkerUpdateIn(BaseModel):
+    worker_type: str | None = Field(default=None, min_length=1, max_length=100)
+    capacity: int | None = Field(default=None, ge=1)
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteResult(BaseModel):
+    """What a delete removed. History (jobs, incidents, workflow runs) is kept unless stated otherwise."""
+
+    deleted: str  # service | instance | worker | workflow_run
+    instances: int = 0
+    workers: int = 0
+    jobs: int = 0
+    events: int = 0
 
 
 class WorkerRegisterIn(BaseModel):
@@ -85,6 +127,7 @@ class WorkerRead(BaseModel):
     last_heartbeat_at: datetime
     registered_at: datetime
     heartbeat_age_s: float
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class HealthUrlIn(BaseModel):

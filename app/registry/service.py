@@ -1,23 +1,28 @@
 import uuid
 from datetime import UTC, datetime
 
+from app.core.errors import Conflict
 from app.db.incident_repository import IncidentRepository
 from app.db.models import ServiceInstanceRow, ServiceRow, WorkerRow
 from app.db.registry_repository import RegistryRepository
 from app.db.workflow_repository import WorkflowRepository
 from app.schemas.enums import InstanceStatus, WorkerStatus
 from app.schemas.registry import (
+    DeleteResult,
     HealthUrlOut,
     HeartbeatIn,
     InstanceRead,
+    InstanceUpdateIn,
     ServiceDetail,
     ServiceRead,
     ServiceRegisterIn,
     ServiceRegisterOut,
+    ServiceUpdateIn,
     WorkerHeartbeatIn,
     WorkerRead,
     WorkerRegisterIn,
     WorkerStatusIn,
+    WorkerUpdateIn,
 )
 
 _WORKER_STALE_KEY = "worker-stale:{}"
@@ -105,7 +110,59 @@ class RegistryService:
             return None
         instances = self._registry.instances_of(service_id)
         base = self._service_read(service, instances)
-        return ServiceDetail(**base.model_dump(), instances=[_instance_read(i) for i in instances])
+        return ServiceDetail(
+            **base.model_dump(), metadata=service.metadata_, instances=[_instance_read(i) for i in instances]
+        )
+
+    def update_service(self, service_id: uuid.UUID, body: ServiceUpdateIn) -> ServiceDetail | None:
+        service = self._registry.get_service(service_id)
+        if service is None:
+            return None
+        if body.version is not None:
+            service.version = body.version
+        if body.metadata is not None:
+            service.metadata_ = _merge(service.metadata_, body.metadata)
+        self._session.commit()
+        return self.get_service(service_id)
+
+    def delete_service(self, service_id: uuid.UUID, *, delete_jobs: bool) -> DeleteResult | None:
+        """Refuses while an instance is still alive, and while jobs exist unless the caller accepts losing them."""
+        service = self._registry.get_service(service_id)
+        if service is None:
+            return None
+        instances = self._registry.instances_of(service_id)
+        alive = [i.instance_id for i in instances if i.status != InstanceStatus.STOPPED.value]
+        if alive:
+            raise Conflict(f"service still has running instances: {', '.join(alive)}; stop or delete them first")
+        jobs = self._registry.count_jobs(service_id)
+        if jobs and not delete_jobs:
+            raise Conflict(f"service has {jobs} jobs; pass delete_jobs=true to delete them with it")
+        counts = self._delete_instances(instances)
+        deleted_jobs = self._registry.delete_service(service)
+        self._session.commit()
+        return DeleteResult(deleted="service", instances=counts[0], workers=counts[1], jobs=deleted_jobs)
+
+    def update_instance(
+        self, service_id: uuid.UUID, instance_id: str, body: InstanceUpdateIn
+    ) -> InstanceRead | None:
+        instance = self._registry.find_instance(service_id, instance_id)
+        if instance is None:
+            return None
+        if body.hostname is not None:
+            instance.hostname = body.hostname
+        if body.metadata is not None:
+            instance.metadata_ = _merge(instance.metadata_, body.metadata)
+        self._session.commit()
+        return _instance_read(instance)
+
+    def delete_instance(self, service_id: uuid.UUID, instance_id: str) -> DeleteResult | None:
+        """Allowed in any state: a process that is still running simply registers again on its next heartbeat."""
+        instance = self._registry.find_instance(service_id, instance_id)
+        if instance is None:
+            return None
+        instances, workers = self._delete_instances([instance])
+        self._session.commit()
+        return DeleteResult(deleted="instance", instances=instances, workers=workers)
 
     # --- workers ------------------------------------------------------------------------
 
@@ -132,6 +189,28 @@ class RegistryService:
         worker = self._registry.get_worker(worker_id)
         return None if worker is None else self._worker_read(worker)
 
+    def update_worker(self, worker_id: uuid.UUID, body: WorkerUpdateIn) -> WorkerRead | None:
+        worker = self._registry.get_worker(worker_id)
+        if worker is None:
+            return None
+        if body.worker_type is not None:
+            worker.worker_type = body.worker_type
+        if body.capacity is not None:
+            worker.capacity = body.capacity
+        if body.metadata is not None:
+            worker.metadata_ = _merge(worker.metadata_, body.metadata)
+        self._session.commit()
+        return self._worker_read(worker)
+
+    def delete_worker(self, worker_id: uuid.UUID) -> DeleteResult | None:
+        worker = self._registry.get_worker(worker_id)
+        if worker is None:
+            return None
+        self._incidents.resolve_by_key(worker_stale_key(worker.id), datetime.now(UTC))
+        workers = self._registry.delete_workers([worker.id])
+        self._session.commit()
+        return DeleteResult(deleted="worker", workers=workers)
+
     def list_workers(
         self, *, status: WorkerStatus | None, service: str | None, limit: int, offset: int
     ) -> list[WorkerRead]:
@@ -143,6 +222,16 @@ class RegistryService:
     def _register_instance(self, service_name, environment, version, instance_id, hostname, metadata, now):
         service = self._workflows.upsert_service(service_name, environment, version)
         return self._registry.upsert_instance(service, instance_id, hostname, metadata, now)
+
+    def _delete_instances(self, instances: list[ServiceInstanceRow]) -> tuple[int, int]:
+        """Close the stale-heartbeat incidents of what is being removed, then delete it."""
+        now = datetime.now(UTC)
+        ids = [i.id for i in instances]
+        for worker_id in self._registry.worker_ids_of(ids):
+            self._incidents.resolve_by_key(worker_stale_key(worker_id), now)
+        for instance_row_id in ids:
+            self._incidents.resolve_by_key(instance_stale_key(instance_row_id), now)
+        return self._registry.delete_instances(ids)
 
     def _recover_instance(self, instance: ServiceInstanceRow, now: datetime) -> None:
         if self._incidents.resolve_by_key(instance_stale_key(instance.id), now):
@@ -212,6 +301,7 @@ class RegistryService:
             last_heartbeat_at=worker.last_heartbeat_at,
             registered_at=worker.registered_at,
             heartbeat_age_s=_age(worker.last_heartbeat_at),
+            metadata=worker.metadata_,
         )
 
 
@@ -223,7 +313,15 @@ def _instance_read(i: ServiceInstanceRow) -> InstanceRead:
         last_heartbeat_at=i.last_heartbeat_at,
         registered_at=i.registered_at,
         heartbeat_age_s=_age(i.last_heartbeat_at),
+        metadata=i.metadata_,
     )
+
+
+def _merge(current: dict, changes: dict) -> dict:
+    """Merge `changes` into `current`; a key set to None is removed. Returns a new dict (JSON columns
+    do not track in-place mutation)."""
+    merged = {**current, **changes}
+    return {k: v for k, v in merged.items() if v is not None}
 
 
 def _age(moment: datetime) -> float:

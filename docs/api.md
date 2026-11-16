@@ -42,12 +42,25 @@ Phản hồi dạng trang: `{"items": [...], "total": N, "limit": N, "offset": N
 | GET | `/services/{service_id}` | | `ServiceDetail` (kèm `instances`) |
 | POST | `/services/{service_id}/heartbeat` | `HeartbeatIn` | `ServiceRegisterOut` |
 | PUT | `/services/{service_id}/instances/{instance_id}/health-url` | `HealthUrlIn` | `HealthUrlOut` |
+| PATCH | `/services/{service_id}` | `ServiceUpdateIn` | `ServiceDetail` |
+| DELETE | `/services/{service_id}` | `delete_jobs` (mặc định false) | `DeleteResult` |
+| PATCH | `/services/{service_id}/instances/{instance_id}` | `InstanceUpdateIn` | `InstanceRead` |
+| DELETE | `/services/{service_id}/instances/{instance_id}` | | `DeleteResult` |
 
 - `ServiceRegisterIn`: `service_name`*, `instance_id`*, `environment` (mặc định `unknown`), `service_version`, `hostname`, `metadata`.
   Đăng ký lại cùng `(service_name, environment)` + `instance_id` là **upsert**: cập nhật bản ghi cũ, đặt `HEALTHY`, làm mới heartbeat,
   gộp `metadata`.
 - `HeartbeatIn`: `instance_id`*, `stopping` (mặc định false). `stopping: true` → instance `STOPPED`. Instance chưa đăng ký → `404`.
 - `HealthUrlIn`: `health_url` (`http://` hoặc `https://`, ≤ 500 ký tự) hoặc `null` để dừng probe. Sai scheme → `422`. Instance lạ → `404`.
+- **Sửa** (`PATCH`, cần key): chỉ field được gửi mới đổi. `ServiceUpdateIn`: `version`, `metadata`. `InstanceUpdateIn`: `hostname`,
+  `metadata` (`metadata.health_url` phải là `http(s)://`, sai → `422`). `metadata` được **gộp** vào giá trị cũ; key có giá trị `null` bị xóa.
+  Tên và environment của service là định danh, **không sửa được**: đăng ký lại với tên mới.
+- **Xóa** (`DELETE`, cần key) trả `DeleteResult` (`deleted`, `instances`, `workers`, `jobs`, `events`):
+  - Instance: xóa được ở mọi trạng thái, kèm worker và lịch sử probe của nó. Tiến trình còn chạy sẽ tự đăng ký lại ở heartbeat kế tiếp.
+  - Service: `409` nếu còn instance chưa `STOPPED` (dừng hoặc xóa instance trước); `409` nếu còn job, trừ khi `delete_jobs=true`
+    (khi đó job và lịch sử job của service bị xóa theo). Incident và workflow step được giữ, chỉ mất liên kết tới service.
+  - Job và incident luôn giữ lịch sử khi xóa instance/worker; chỉ mất liên kết tới worker đã xóa.
+- `ServiceDetail`, `InstanceRead` và `WorkerRead` có thêm `metadata`.
 - `ServiceRead.status`: `HEALTHY` / `DEGRADED` / `UNHEALTHY` / `STOPPED` / `NO_INSTANCES` (quy tắc ở `data-model.md`).
 
 ## Workers
@@ -59,10 +72,13 @@ Phản hồi dạng trang: `{"items": [...], "total": N, "limit": N, "offset": N
 | GET | `/workers/{worker_id}` | | `WorkerRead` |
 | POST | `/workers/{worker_id}/heartbeat` | `WorkerHeartbeatIn` | `WorkerRead` |
 | POST | `/workers/{worker_id}/status` | `WorkerStatusIn` | `WorkerRead` |
+| PATCH | `/workers/{worker_id}` | `WorkerUpdateIn` | `WorkerRead` |
+| DELETE | `/workers/{worker_id}` | | `DeleteResult` |
 
 - `WorkerRegisterIn`: `service_name`*, `instance_id`*, `worker_name`*, `environment`, `service_version`, `worker_type`, `capacity` (≥1), `metadata`.
   Đăng ký cũng upsert instance. Trạng thái ban đầu `REGISTERED`.
 - `WorkerHeartbeatIn`: `status` (tùy chọn), `current_job_id` (tùy chọn). `WorkerStatusIn`: `status`*, `current_job_id`.
+- `WorkerUpdateIn`: `worker_type`, `capacity` (≥1), `metadata` (gộp, `null` xóa key). Xóa worker giữ nguyên job của nó.
 - `WorkerRead` có `heartbeat_age_s`, `current_job_id`, `capacity`.
 
 ## Events (nhật ký sự kiện workflow)
@@ -109,6 +125,7 @@ cả batch. `EventBatchResult` có `accepted`, `duplicates`, `rejected`.
 | GET | `/workflow-runs/{run_id}/steps` | `[StepRead]` |
 | GET | `/workflow-runs/{run_id}/timeline` | `[TimelineEntry]` — bước và lần thử theo thời gian, kèm `duration_ms` |
 | GET | `/workflow-runs/{run_id}/events` | Trang `EventRead` của run |
+| DELETE | `/workflow-runs/{run_id}` | Xóa run cùng step, attempt và nhật ký sự kiện → `DeleteResult`. Run chưa kết thúc: `409` trừ khi `force=true` |
 | POST | `/workflows` | Tạo định nghĩa (`WorkflowDefinitionIn`) |
 | GET | `/workflows` | `[WorkflowDefinitionRead]` |
 
